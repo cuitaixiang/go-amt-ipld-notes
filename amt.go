@@ -19,10 +19,13 @@ const width = 8
 
 var MaxIndex = uint64(1 << 48) // fairly arbitrary, but I don't want to overflow/underflow in nodesForHeight
 
+// 根
 type Root struct {
+	// 高度
 	Height uint64
-	Count  uint64
-	Node   Node
+	// 数量
+	Count uint64
+	Node  Node
 
 	store cbor.IpldStore
 }
@@ -400,6 +403,7 @@ func (n *Node) loadNode(ctx context.Context, bs cbor.IpldStore, i uint64, create
 	return subn, nil
 }
 
+// 指定宽度下，某高度的节点数量（pow(width, height)）
 func nodesForHeight(width, height int) uint64 {
 	val := math.Pow(float64(width), float64(height))
 	if val >= float64(math.MaxUint64) {
