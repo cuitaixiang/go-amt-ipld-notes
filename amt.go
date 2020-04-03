@@ -21,9 +21,9 @@ var MaxIndex = uint64(1 << 48) // fairly arbitrary, but I don't want to overflow
 
 // 根
 type Root struct {
-	// 高度
+	// 高度，用于判断是否叶子节点
 	Height uint64
-	// 数量
+	// 数量，计数供外部程序使用
 	Count uint64
 	// 根指向的节点
 	Node Node
@@ -40,11 +40,11 @@ type Node struct {
 	// 叶子节点值，普通子节点无，普通子节点序列化占位
 	Values []*cbg.Deferred
 
-	// 缓存链接，位置和bit map一一对应
+	// 扩展链接，位置和bit map一一对应，存放最新的变化
 	expLinks []cid.Cid
-	// 缓存值，位置和bit map一一对应
+	// 扩展值，位置和bit map一一对应，存放最新的变化
 	expVals []*cbg.Deferred
-	// 缓存子节点，位置和bit map一一对应
+	// 缓存子节点
 	cache []*Node
 }
 
@@ -127,6 +127,7 @@ func (r *Root) Set(ctx context.Context, i uint64, val interface{}) error {
 	return nil
 }
 
+// 从数组直接生成
 func FromArray(ctx context.Context, bs cbor.IpldStore, vals []cbg.CBORMarshaler) (cid.Cid, error) {
 	r := NewAMT(bs)
 	if err := r.BatchSet(ctx, vals); err != nil {
@@ -193,6 +194,7 @@ func (n *Node) get(ctx context.Context, bs cbor.IpldStore, height int, i uint64,
 	return subn.get(ctx, bs, height-1, i%nodesForHeight(width, height), out)
 }
 
+// 按索引批量删除
 func (r *Root) BatchDelete(ctx context.Context, indices []uint64) error {
 	// TODO: theres a faster way of doing this, but this works for now
 	for _, i := range indices {
@@ -204,7 +206,9 @@ func (r *Root) BatchDelete(ctx context.Context, indices []uint64) error {
 	return nil
 }
 
+// 删掉第i个值
 func (r *Root) Delete(ctx context.Context, i uint64) error {
+	// 先查找，索引不能超过
 	if i >= MaxIndex {
 		return fmt.Errorf("index %d is out of range for the amt", i)
 	}
@@ -213,11 +217,15 @@ func (r *Root) Delete(ctx context.Context, i uint64) error {
 		return &ErrNotFound{i}
 	}
 
+	// 清除值
 	if err := r.Node.delete(ctx, r.store, int(r.Height), i); err != nil {
 		return err
 	}
+	// 总数减一
 	r.Count--
 
+	// 由于宽度定死8位，即一直是bmap[0]
+	// 如果bmap[0]=00000001，即只有当前节点的子节点只有一个，且高度大于0，可以直接删掉该子节点，用子节点的子节点作为子节点
 	for r.Node.Bmap[0] == 1 && r.Height > 0 {
 		sub, err := r.Node.loadNode(ctx, r.store, 0, false)
 		if err != nil {
@@ -231,13 +239,14 @@ func (r *Root) Delete(ctx context.Context, i uint64) error {
 	return nil
 }
 
+// 清除某位置的值
 func (n *Node) delete(ctx context.Context, bs cbor.IpldStore, height int, i uint64) error {
 	subi := i / nodesForHeight(width, height)
 	set, _ := n.getBit(subi)
 	if !set {
 		return &ErrNotFound{i}
 	}
-	if height == 0 {
+	if height == 0 { // 找到叶子节点，清除该位置上的值
 		n.expandValues()
 
 		n.expVals[i] = nil
@@ -246,15 +255,18 @@ func (n *Node) delete(ctx context.Context, bs cbor.IpldStore, height int, i uint
 		return nil
 	}
 
+	// 找子节点，直到找到叶子节点
 	subn, err := n.loadNode(ctx, bs, subi, false)
 	if err != nil {
 		return err
 	}
 
+	// 从子节点删
 	if err := subn.delete(ctx, bs, height-1, i%nodesForHeight(width, height)); err != nil {
 		return err
 	}
 
+	// 删完之后如果为空，清除上层标志及缓存、链接
 	if subn.empty() {
 		n.clearBit(subi)
 		n.cache[subi] = nil
@@ -265,6 +277,7 @@ func (n *Node) delete(ctx context.Context, bs cbor.IpldStore, height int, i uint
 }
 
 // Subtract removes all elements of 'or' from 'r'
+// 遍历删除
 func (r *Root) Subtract(ctx context.Context, or *Root) error {
 	// TODO: as with other methods, there should be an optimized way of doing this
 	return or.ForEach(ctx, func(i uint64, _ *cbg.Deferred) error {
@@ -272,16 +285,20 @@ func (r *Root) Subtract(ctx context.Context, or *Root) error {
 	})
 }
 
+// 遍历
 func (r *Root) ForEach(ctx context.Context, cb func(uint64, *cbg.Deferred) error) error {
+	// 根节点前面没有叶子节点了，偏移量为0
 	return r.Node.forEach(ctx, r.store, int(r.Height), 0, cb)
 }
 
+// 递归遍历，需要偏移量计算全局索引值
 func (n *Node) forEach(ctx context.Context, bs cbor.IpldStore, height int, offset uint64, cb func(uint64, *cbg.Deferred) error) error {
-	if height == 0 {
+	if height == 0 { // 叶子节点的值，依次处理
 		n.expandValues()
 
 		for i, v := range n.expVals {
 			if v != nil {
+				// 根据偏移量计算全局索引
 				if err := cb(offset+uint64(i), v); err != nil {
 					return err
 				}
@@ -295,15 +312,19 @@ func (n *Node) forEach(ctx context.Context, bs cbor.IpldStore, height int, offse
 		n.expandLinks()
 	}
 
+	// 某高度的叶子节点数量
 	subCount := nodesForHeight(width, height)
-	for i, v := range n.expLinks {
+	for i, v := range n.expLinks { // 非叶子节点，先处理其每个子节点
 		if v != cid.Undef {
 			var sub Node
+			// 加载子节点
 			if err := bs.Get(ctx, v, &sub); err != nil {
 				return err
 			}
 
+			// 计算全局索引号，需要先知道前面有多少叶子节点，即偏移量
 			offs := offset + (uint64(i) * subCount)
+			// 先把子节点遍历处理完
 			if err := sub.forEach(ctx, bs, height-1, offs, cb); err != nil {
 				return err
 			}
@@ -411,7 +432,7 @@ func (n *Node) expandLinks() {
 	}
 }
 
-// 加载一个子节点
+// 加载本节点第i个子节点，根据标志没有是否创建新节点
 func (n *Node) loadNode(ctx context.Context, bs cbor.IpldStore, i uint64, create bool) (*Node, error) {
 	if n.cache == nil {
 		// 无缓存，先分配空间
@@ -443,7 +464,7 @@ func (n *Node) loadNode(ctx context.Context, bs cbor.IpldStore, i uint64, create
 			return nil, fmt.Errorf("no node found at (sub)index %d", i)
 		}
 	}
-	// 放入缓存，供以后使用
+	// 新子节点放入缓存，供以后使用
 	n.cache[i] = subn
 
 	return subn, nil
@@ -485,7 +506,7 @@ func (n *Node) Flush(ctx context.Context, bs cbor.IpldStore, depth int) error {
 		n.Bmap = []byte{0}
 		n.Values = nil
 		for i := uint64(0); i < width; i++ {
-			// 叶子节点只需更新bitmap和值
+			// 叶子节点只需更新bitmap和值，把缓存中的新值更新下去
 			v := n.expVals[i]
 			if v != nil {
 				n.Values = append(n.Values, v)
@@ -520,7 +541,7 @@ func (n *Node) Flush(ctx context.Context, bs cbor.IpldStore, depth int) error {
 			n.expLinks[i] = c
 		}
 
-		// 更新非子节点links
+		// 更新子节点links
 		l := n.expLinks[i]
 		if l != cid.Undef {
 			n.Links = append(n.Links, l)
