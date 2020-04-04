@@ -82,6 +82,7 @@ func TestOutOfRange(t *testing.T) {
 	}
 }
 
+// 删除并断言删除成功
 func assertDelete(t *testing.T, r *Root, i uint64) {
 	ctx := context.Background()
 
@@ -107,6 +108,7 @@ func assertDelete(t *testing.T, r *Root, i uint64) {
 	*/
 }
 
+// set并断言成功
 func assertSet(t *testing.T, r *Root, i uint64, val string) {
 	ctx := context.Background()
 
@@ -116,6 +118,7 @@ func assertSet(t *testing.T, r *Root, i uint64, val string) {
 	}
 }
 
+// 断言数量相等
 func assertCount(t testing.TB, r *Root, c uint64) {
 	t.Helper()
 	if r.Count != c {
@@ -123,6 +126,7 @@ func assertCount(t testing.TB, r *Root, c uint64) {
 	}
 }
 
+// get并断言相等
 func assertGet(ctx context.Context, t testing.TB, r *Root, i uint64, val string) {
 
 	t.Helper()
